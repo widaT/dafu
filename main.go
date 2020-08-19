@@ -1,0 +1,133 @@
+package main
+
+import (
+	"flag"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+
+	"github.com/dgraph-io/badger"
+	"github.com/miekg/dns"
+)
+
+var db *badger.DB
+
+func init() {
+	var err error
+	options := badger.DefaultOptions("data/")
+	options.Logger = nil
+	db, err = badger.Open(options)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := Replay(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func NewRR(s string) dns.RR { r, _ := dns.NewRR(s); return r }
+
+func main() {
+	port := flag.Int("port", 8053, "port to run on")
+	flag.Parse()
+
+	go func() {
+		srv := &dns.Server{Addr: ":" + strconv.Itoa(*port), Net: "udp"}
+		if err := srv.ListenAndServe(); err != nil {
+			log.Fatalf("Failed to set udp listener %s\n", err.Error())
+		}
+	}()
+
+	go func() {
+
+		http.HandleFunc("/add", func(wr http.ResponseWriter, rq *http.Request) {
+
+			rq.ParseForm()
+
+			domain := rq.PostFormValue("d")
+			ip := rq.PostFormValue("ip")
+			tp := rq.PostFormValue("tp")
+
+			if domain == "" || ip == "" {
+				wr.Write([]byte("error"))
+				return
+			}
+
+			if tp == "" {
+				tp = "A"
+			}
+			if tp != "A" && tp != "AAAA" {
+				wr.Write([]byte("error"))
+				return
+			}
+
+			domain += "."
+
+			str := domain + " IN " + tp + " " + ip
+			rr := NewRR(str)
+
+			switch rr.(type) {
+			case *dns.A:
+			case *dns.AAAA:
+			default:
+				wr.Write([]byte("error"))
+				return
+			}
+
+			Save(domain, str)
+
+			dns.HandleFunc(domain, func(w dns.ResponseWriter, r *dns.Msg) {
+				m := new(dns.Msg)
+				m.SetReply(r)
+				m.Ns = []dns.RR{rr}
+				w.WriteMsg(m)
+			})
+
+			wr.Write([]byte("ok"))
+		})
+		http.ListenAndServe(":9898", nil)
+	}()
+
+	sig := make(chan os.Signal)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	s := <-sig
+	log.Fatalf("Signal (%v) received, stopping\n", s)
+}
+
+//Save 保存解析记录
+func Save(domain, value string) error {
+	return db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(domain), []byte(value))
+	})
+}
+
+//Replay 解析记录重放
+func Replay() error {
+	return db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchSize = 10
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			k := string(item.Key())
+			var val string
+			item.Value(func(v []byte) error {
+				val = string(v)
+				return nil
+			})
+			dns.HandleFunc(k, func(w dns.ResponseWriter, r *dns.Msg) {
+				m := new(dns.Msg)
+				m.SetReply(r)
+				m.Ns = []dns.RR{NewRR(val)}
+				w.WriteMsg(m)
+			})
+
+		}
+		return nil
+	})
+}
