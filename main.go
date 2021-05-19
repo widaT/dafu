@@ -81,6 +81,9 @@ func main() {
 			Save(domain, str)
 
 			dns.HandleFunc(domain, func(w dns.ResponseWriter, r *dns.Msg) {
+				//这边还可以根据的udp的remoteaddr 动态调度解析地址
+				//w.RemoteAddr()
+				log.Println("remote addr ", w.RemoteAddr())
 				m := new(dns.Msg)
 				m.SetReply(r)
 				m.Ns = []dns.RR{rr}
@@ -120,9 +123,11 @@ func Replay() error {
 				val = string(v)
 				return nil
 			})
+			log.Println("rr ", val)
 			dns.HandleFunc(k, func(w dns.ResponseWriter, r *dns.Msg) {
 				m := new(dns.Msg)
 				m.SetReply(r)
+
 				m.Ns = []dns.RR{NewRR(val)}
 				w.WriteMsg(m)
 			})
