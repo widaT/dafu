@@ -36,11 +36,34 @@ func main() {
 	flag.Parse()
 
 	go func() {
-		srv := &dns.Server{Addr: ":" + strconv.Itoa(*port), Net: "udp"}
+		srv := &dns.Server{Addr: "0.0.0.0:" + strconv.Itoa(*port), Net: "udp"}
 		if err := srv.ListenAndServe(); err != nil {
 			log.Fatalf("Failed to set udp listener %s\n", err.Error())
 		}
 	}()
+
+	//没有对应找到域名解析，一般要镜像forward
+	dns.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+
+		qDomain := ""
+
+		if len(r.Question) > 0 {
+			qDomain = r.Question[0].Name
+			log.Printf("remote addr %s %#v", w.RemoteAddr(), r.Question[0].Name)
+		}
+
+		m := new(dns.Msg)
+
+		//这边可以回空
+		//m.Ns = []dns.RR{}
+
+		//这边可以写逻辑
+		str := qDomain + " IN  A  " + "127.0.0.1"
+		rr := NewRR(str)
+		m.SetReply(r)
+		m.Ns = []dns.RR{rr}
+		w.WriteMsg(m)
+	})
 
 	go func() {
 
@@ -78,6 +101,7 @@ func main() {
 				return
 			}
 
+			log.Printf("add domain:%s", domain)
 			Save(domain, str)
 
 			dns.HandleFunc(domain, func(w dns.ResponseWriter, r *dns.Msg) {
@@ -101,14 +125,14 @@ func main() {
 	log.Fatalf("Signal (%v) received, stopping\n", s)
 }
 
-//Save 保存解析记录
+// Save 保存解析记录
 func Save(domain, value string) error {
 	return db.Update(func(txn *badger.Txn) error {
 		return txn.Set([]byte(domain), []byte(value))
 	})
 }
 
-//Replay 解析记录重放
+// Replay 解析记录重放
 func Replay() error {
 	return db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
